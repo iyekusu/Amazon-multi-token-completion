@@ -1,5 +1,5 @@
-DATA_PATH = '/home/s2299194/amazon-multi-token-completion'
-HOME_DIR = '/home/s2299194/amazon-multi-token-completion'
+DATA_PATH = ''
+HOME_DIR = ''
 
 SAGEMAKER_ROLE = None
 SAGEMAKER_BUCKET = None

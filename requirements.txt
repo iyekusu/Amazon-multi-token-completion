@@ -1,0 +1,10 @@
+datasets[s3]==2.19.2
+questionary==2.0.1
+termcolor==2.4.0
+pytorch-lightning==2.2.5 
+ray[default]==2.24.0
+torch==2.3.0
+
+
+
+

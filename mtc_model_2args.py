@@ -433,14 +433,13 @@ class Seq2Seq(pl.LightningModule):
                                  device='cuda')  # [1, batch size, embedding size]
         return hidden
 
-
-def parse_data(dataset_name='wiki_default', dataset_suffix=''):
+def parse_data(dataset_name='wiki_2args', dataset_suffix=''):
     bert: BertModel = AutoModel.from_pretrained(p['model']).cuda()
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(p['model'])
-    if dataset_name == 'wiki_default':
-        s3_prefix = f'{DATA_PATH}/{dataset_name}'
+    if dataset_name == 'wiki_2args':
+        s3_prefix = f'{DATA_PATH}/wiki_2args'
         train_dataset = datasets.DatasetDict(
-            {k: datasets.Dataset.from_pandas(pd.read_csv(f'{s3_prefix}/{k}.csv', na_filter=False)) for k in ['test_preposed' , 'test_canonical']})
+            {k: datasets.Dataset.from_pandas(pd.read_csv(f'{s3_prefix}/{k}.csv', na_filter=False)) for k in ['train', 'dev', 'test_preposed', 'test_canonical']})
     else:
         raise Exception(f'parsing of dataset {dataset_name} is not defined')
 
@@ -455,7 +454,21 @@ def parse_data(dataset_name='wiki_default', dataset_suffix=''):
     MASK_TOKEN_ID = tokenizer.mask_token_id
 
     def get_mask_loc(examples):
-        return {'mask_loc': [v.index(MASK_TOKEN_ID) for v in tokenizer(examples['masked_text'], padding=True)['input_ids']]}
+        converted_examples = [ast.literal_eval(v) for v in examples['masked_text']]
+    
+        mask_locs = []
+        for v in converted_examples:
+            try:
+                tokenized_output = tokenizer(v[0], v[1], padding=True)
+                mask_index = tokenized_output['input_ids'].index(MASK_TOKEN_ID)
+                mask_locs.append(mask_index)
+            except Exception as e:
+                print(f"Error processing {v}: {e}")
+                mask_locs.append(None)  
+        print(f"mask_locs: {mask_locs}")
+        # 返回结果
+        return {'mask_loc': mask_locs}
+
 
     print(train_dataset)
     dataset_w_maskloc = train_dataset.map(
@@ -475,26 +488,25 @@ def parse_data(dataset_name='wiki_default', dataset_suffix=''):
     dataset_w_maskloc128 = datasets.load_from_disk(f'data/preprocessed_data_{p["model"]}{dataset_suffix}')
 
     print("DATASET", dataset_w_maskloc128)
-
+                
     def to_features(samples):
-        masked_text = samples['masked_text']
+        masked_text = [ast.literal_eval(text) for text in samples['masked_text']] 
         mask_loc = samples['mask_loc']
-        tokenized = tokenizer(masked_text, return_tensors='pt', padding='max_length', truncation=True,
-                              max_length=128)
+
+        tokenized = tokenizer(
+            text=[pair[0] for pair in masked_text],
+            text_pair=[pair[1] for pair in masked_text],
+            return_tensors='pt',
+            padding='max_length',
+            truncation=True,
+            max_length=128)
         with torch.no_grad():
             features = bert(**tokenized.to(device='cuda'))[0].cpu()
 
         return {'input_features': [f[l].numpy().tolist() for f, l in zip(features, mask_loc)],
                 'prev_token': [int(tokenized['input_ids'][i][l - 1]) for i, l in enumerate(mask_loc)]
-                }
+                 }
 
-    def to_toks(samples):
-        masked_text = samples['masked_text']
-        mask_loc = samples['mask_loc']
-        tokenized = tokenizer(masked_text, return_tensors='pt', padding='max_length', truncation=True, max_length=128)
-
-        return {'prev_token': [tokenized['input_ids'][i][l - 1] for i, l in enumerate(mask_loc)]
-                }
 
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
     input_features = dataset_w_maskloc128.map(
@@ -564,8 +576,7 @@ def train(config=p, input_features=None, num_gpus=1, tune=False):
         callbacks = [TuneReportCallback({"loss": "val_loss"}, on="validation_end")]
 
     trainer = Trainer(
-        accelerator="gpu"
-        , devices=num_gpus
+        gpus=num_gpus
         , logger=TensorBoardLogger(save_dir=os.getcwd(), version=version, name='eacl2022_models')
         , max_epochs=config['epochs']
         , val_check_interval=config['val_check_interval']
@@ -624,7 +635,7 @@ if __name__ == '__main__':
     parser.add_argument("--context_as_hidden", type=ast.literal_eval, default=True)  # Hack: python3.6 doesn't support bool natively
     parser.add_argument("--use_prev_token", type=ast.literal_eval, default=True)  # Hack: python3.6 doesn't support bool natively
     parser.add_argument("--use_positions", type=ast.literal_eval, default=True)  # Hack: python3.6 doesn't support bool natively
-    parser.add_argument("--load_from_pretrain", type=ast.literal_eval, default=False)  # Hack: python3.6 doesn't support bool natively
+    parser.add_argument("--load_from_pretrain", type=ast.literal_eval, default=True)  # Hack: python3.6 doesn't support bool natively
     parser.add_argument("--context_as_input", type=ast.literal_eval, default=False)  # Hack: python3.6 doesn't support bool natively
     parser.add_argument("--translation", type=ast.literal_eval, default=False)  # Hack: python3.6 doesn't support bool natively
     parser.add_argument("--complex_translation", type=ast.literal_eval, default=False)  # Hack: python3.6 doesn't support bool natively
@@ -638,7 +649,7 @@ if __name__ == '__main__':
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--val_check_interval", type=float, default=0.2)
     parser.add_argument("--init_embeddings", action='store_true')
-    parser.add_argument("--dataset_name", type=str, default='wiki_default')
+    parser.add_argument("--dataset_name", type=str, default='wiki_2args')
     parser.add_argument("--data_only", type=ast.literal_eval, default=True)
     args = parser.parse_args()
     args_dict = vars(args)
@@ -668,10 +679,8 @@ if __name__ == '__main__':
         parse_data(dataset_name, dataset_suffix)
 
     if not args.data_only:
-        storage_options = None
-        if input_path.startswith('s3://'): 
-            fs = S3FileSystem() 
-            storage_options = fs.storage_options
-        input_features = datasets.load_from_disk(input_path, storage_options=storage_options)
+        fs = S3FileSystem() if input_path.startswith('s3://') else None
+        input_features = datasets.load_from_disk(input_path, fs=fs)
         print(input_features)
+
         train(args_dict, input_features)
